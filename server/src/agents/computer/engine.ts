@@ -1896,11 +1896,25 @@ function codexSecureConfigOverrides(args: { home: string; env: NodeJS.ProcessEnv
   return exec === -1 ? full : full.slice(0, Math.max(0, exec - 2))
 }
 
+/** Codex's Linux launcher re-execs its native binary from inside its own
+ *  bwrap sandbox. Cumora must expose that install root read-only or commands
+ *  fail with ENOENT even though the outer Codex process started successfully. */
+function codexSandboxReadPaths(): string[] {
+  try {
+    const { command } = resolveSpawn('codex')
+    const resolved = realpathSync(command)
+    return [resolved.endsWith(join('bin', 'codex.js')) ? dirname(dirname(resolved)) : dirname(resolved)]
+  } catch {
+    return []
+  }
+}
+
 function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
   const workspaceAccess = readOnly ? 'read' : 'write'
   const filesystemEntries = [
     '":minimal"="read"',
     `":workspace_roots"={"."="${workspaceAccess}"}`,
+    ...codexSandboxReadPaths().map((path) => `${tomlString(path)}="read"`),
   ]
   const filesystem = `permissions.cumora.filesystem={${filesystemEntries.join(',')}}`
   const secureArgs = [
