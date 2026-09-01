@@ -1634,10 +1634,9 @@ function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, rea
     '-c', 'features.remote_plugin=false',
     '-c', 'features.multi_agent=false',
     '-c', 'features.shell_snapshot=false',
-    // Untrusted projects skip project-local config, hooks, and rules. This is a
-    // CLI override (highest precedence), so a model cannot plant a more
-    // privileged .codex layer for the next one-shot wake.
-    '-c', `projects.${tomlString(args.home)}.trust_level="untrusted"`,
+    // --ignore-user-config and --ignore-rules below disable project-local
+    // configuration and rules without relying on the version-sensitive
+    // `projects.<path>` config override, which recent Codex CLIs reject.
     ...codexToolEnvironmentArgs(args),
   ]
   if (!readOnly) {

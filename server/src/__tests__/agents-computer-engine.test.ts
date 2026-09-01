@@ -409,7 +409,7 @@ test('Codex one-shot paths send prompts through stdin', async () => {
   assert.equal(runCapture.argv?.some((arg) => arg.includes(`${join(root, 'private-ipc', 'responses')}"="write`)), false)
   assert.ok(runCapture.argv?.includes('web_search="disabled"'))
   assert.ok(runCapture.argv?.includes('features.hooks=false'))
-  assert.ok(runCapture.argv?.includes(`projects.${JSON.stringify(home)}.trust_level="untrusted"`))
+  assert.equal(runCapture.argv?.some((arg) => arg.startsWith('projects.')), false)
   assert.ok(runCapture.argv?.some((arg) =>
     arg.startsWith('mcp_servers.cumora={')
       && arg.includes(`command=${JSON.stringify(process.execPath)}`)
