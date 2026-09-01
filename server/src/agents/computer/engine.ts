@@ -24,7 +24,7 @@
  */
 import { type ChildProcess, execFile, execFileSync, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { access, lstat, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
@@ -1618,11 +1618,25 @@ function codexToolEnvironmentArgs(args: { home: string; env: NodeJS.ProcessEnv }
   return ['-c', `shell_environment_policy.set={${entries.join(',')}}`]
 }
 
+/** Codex's Linux launcher re-execs its native binary from inside its own
+ *  bwrap sandbox. Cumora must expose that install root read-only or commands
+ *  fail with ENOENT even though the outer Codex process started successfully. */
+function codexSandboxReadPaths(): string[] {
+  try {
+    const { command } = resolveSpawn('codex')
+    const resolved = realpathSync(command)
+    return [resolved.endsWith(join('bin', 'codex.js')) ? dirname(dirname(resolved)) : dirname(resolved)]
+  } catch {
+    return []
+  }
+}
+
 function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
   const workspaceAccess = readOnly ? 'read' : 'write'
   const filesystemEntries = [
     '":minimal"="read"',
     `":workspace_roots"={"."="${workspaceAccess}"}`,
+    ...codexSandboxReadPaths().map((path) => `${tomlString(path)}="read"`),
   ]
   const filesystem = `permissions.cumora.filesystem={${filesystemEntries.join(',')}}`
   const secureArgs = [
