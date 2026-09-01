@@ -419,6 +419,13 @@ test('Codex one-shot paths send prompts through stdin', async () => {
       && arg.includes('enabled_tools=["cli"]')
       && arg.includes('required=true'),
   ))
+  assert.ok(runCapture.argv?.some((arg) =>
+    arg.startsWith('mcp_servers.codegraph=')
+      && arg.includes('serve')
+      && arg.includes('--mcp')
+      && arg.includes('--path')
+      && arg.includes(`${join(home, 'workspace')}`),
+  ))
   assert.ok(runCapture.argv?.includes('exec'))
   assert.ok(runCapture.argv?.includes('--ignore-user-config'))
   assert.ok(runCapture.argv?.includes('--ignore-rules'))

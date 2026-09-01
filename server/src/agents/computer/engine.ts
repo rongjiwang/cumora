@@ -24,7 +24,7 @@
  */
 import { type ChildProcess, execFile, execFileSync, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { access, lstat, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
@@ -1635,12 +1635,35 @@ function codexSandboxReadPaths(): string[] {
   }
 }
 
+function codegraphSandboxReadPaths(): string[] {
+  try {
+    const { command } = resolveSpawn('codegraph')
+    const resolved = realpathSync(command)
+    const binaryDir = dirname(resolved)
+    return [dirname(binaryDir), binaryDir, resolved]
+  } catch {
+    return []
+  }
+}
+
+function codegraphProjectPath(workspace: string): string {
+  try {
+    const indexedProjects = readdirSync(workspace, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(join(workspace, entry.name, '.codegraph')))
+      .map((entry) => join(workspace, entry.name))
+    return indexedProjects.length === 1 ? indexedProjects[0] : workspace
+  } catch {
+    return workspace
+  }
+}
+
 function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
   const workspaceAccess = readOnly ? 'read' : 'write'
   const filesystemEntries = [
     '":minimal"="read"',
     `":workspace_roots"={"."="${workspaceAccess}"}`,
     ...codexSandboxReadPaths().map((path) => `${tomlString(path)}="read"`),
+    ...codegraphSandboxReadPaths().map((path) => `${tomlString(path)}="read"`),
   ]
   const filesystem = `permissions.cumora.filesystem={${filesystemEntries.join(',')}}`
   const secureArgs = [
@@ -1663,6 +1686,10 @@ function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, rea
     if (!mcpShim || !ipcDir) throw new Error('secure Cumora MCP bridge is not configured')
     const mcp = `mcp_servers.cumora={command=${tomlString(process.execPath)},args=[${tomlString(mcpShim)}],env={CUMORA_AGENT_IPC_DIR=${tomlString(ipcDir)}},required=true,enabled_tools=["cli"],default_tools_approval_mode="approve"}`
     secureArgs.push('-c', mcp)
+    try {
+      const { command } = resolveSpawn('codegraph')
+      secureArgs.push('-c', `mcp_servers.codegraph={command=${tomlString(command)},args=[${tomlString('serve')},${tomlString('--mcp')},${tomlString('--path')},${tomlString(codegraphProjectPath(join(args.home, 'workspace')))}]}`)
+    } catch { /* CodeGraph is optional on machines that do not install it. */ }
   }
   return [...secureArgs, '-a', 'never', 'exec', '--ignore-user-config', '--ignore-rules']
 }
