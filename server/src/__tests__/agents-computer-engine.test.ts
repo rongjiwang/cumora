@@ -94,6 +94,20 @@ test('secure adapters replace persona symlinks without writing their targets', {
   }
 })
 
+test('Codex scaffold names the files it actually loads', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cumora-codex-scaffold-'))
+  tempDirs.push(root)
+  const home = join(root, 'home')
+  await mkdir(home)
+  await getAdapter('codex').seedHome(home, {
+    id: 'codex', name: 'Codex', role: 'Tester', systemPrompt: null,
+  })
+  const agents = await readFile(join(home, 'AGENTS.md'), 'utf8')
+  assert.match(agents, /`AGENTS\.md` \(this file\)/)
+  assert.match(agents, /`skills\/` — your skills/)
+  assert.doesNotMatch(agents, /CLAUDE\.md|\.claude\/skills/)
+})
+
 test('secure adapters reject linked state directories', {
   skip: IS_WIN,
 }, async () => {

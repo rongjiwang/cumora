@@ -11,9 +11,9 @@
  *
  * Run: node --import tsx --test server/src/__tests__/agents-computer-inbox-digest.test.ts
  */
-import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { conversationHeader, renderInboxDigest } from '../agents/computer/daemon.js'
+import { test } from 'node:test'
+import { conversationHeader, renderInboxDigest, runtimeAgentStateDelta } from '../agents/computer/daemon.js'
 
 type Convo = { head: string; msgs: string[] }
 
@@ -30,6 +30,16 @@ function build(spec: Array<[string, number]>): Map<string, Convo> {
 
 const messageLines = (digest: string): string[] =>
   digest.split('\n').filter((l) => /^ {2}\[m-/.test(l))
+
+test('BYOA turns receive canonical persona and skill state', () => {
+  const delta = runtimeAgentStateDelta({
+    prompt: '## YOUR SOUL\nBe direct.',
+    skills: [{ name: 'review', description: 'Review code', path: 'skills/review/SKILL.md' }],
+  })
+  assert.match(delta, /YOUR SOUL/)
+  assert.match(delta, /review: Review code/)
+  assert.match(delta, /cumora skills read <name>/)
+})
 
 test('everything is shown verbatim when it fits the budget', () => {
   const digest = renderInboxDigest(build([['a', 3], ['b', 2]]), 40)

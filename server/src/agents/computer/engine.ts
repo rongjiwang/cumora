@@ -2069,7 +2069,10 @@ class CodexAdapter implements EngineAdapter {
   async seedHome(home: string, persona: EnginePersona): Promise<void> {
     await ensureCommonHome(home)
     // See ClaudeAdapter.seedHome: system-owned, safe to overwrite every start.
-    await atomicAgentWrite(join(home, 'AGENTS.md'), PERSONA_HEADER(persona))
+    await atomicAgentWrite(
+      join(home, 'AGENTS.md'),
+      PERSONA_HEADER(persona, { personaFile: 'AGENTS.md', skillsDir: 'skills/' }),
+    )
   }
 
   run(args: EngineRunArgs): Promise<EngineRunResult> {

@@ -355,6 +355,28 @@ interface RuntimeInboxResponse {
   }>
 }
 
+interface RuntimeAgentState {
+  prompt?: string | null
+  skills?: Array<{ name: string; description: string; path: string }>
+}
+
+/** The server's agent_workspace is canonical for persona files and skills.
+ * BYOA homes contain only the engine scaffold, so carry the live DB state into
+ * every turn instead of letting a local engine run with stale or missing state. */
+export function runtimeAgentStateDelta(state: RuntimeAgentState | null): string {
+  if (!state) return ''
+  const sections: string[] = []
+  if (state.prompt?.trim()) sections.push(
+    `Canonical Cumora instructions (loaded from the agent workspace; follow these in addition to this local engine scaffold):\n${state.prompt.trim()}`,
+  )
+  if (state.skills?.length) sections.push(
+    `Installed skills (canonical index; read a skill with \`cumora skills read <name>\` when relevant):\n${state.skills
+      .map((skill) => `- ${skill.name}: ${skill.description} (${skill.path})`)
+      .join('\n')}`,
+  )
+  return sections.join('\n\n')
+}
+
 // How many unread MESSAGE lines the pre-loaded wake digest may carry. It rides
 // in EVERY chat turn's prompt (see chatDelta), so it stays small.
 const DIGEST_MAX_MESSAGE_LINES = 40
@@ -2173,7 +2195,7 @@ class AgentRunner {
   /** Per-turn CHAT delta — only the dynamic bits (the invariant HOW lives in the
    *  standing prompt). Kept small so the persistent session's transcript grows
    *  slowly and native compaction can keep up. */
-  private chatDelta(memoryDigest: string, triageNote: string, inboxDigest: string, roster?: string): string {
+  private chatDelta(memoryDigest: string, triageNote: string, inboxDigest: string, roster?: string, agentState?: string): string {
     return (
       `You've been woken because there's new activity in your Cumora conversations, and the cerebellum triage already ` +
       `decided you should respond — your job is to DO it (write the reply / take the action), not to re-judge whether to. ` +
@@ -2193,7 +2215,8 @@ class AgentRunner {
           `these; but DO \`cumora glance\` before posting in a group, to catch anything posted while you compose):\n${inboxDigest}\n\n`
         : `Run \`cumora inbox\`, then \`cumora messages <conversationId> --tail 30\`, to catch up.\n\n`) +
       (memoryDigest ? `Your memory index (global \`memory/MEMORY.md\` + current project, if any):\n${memoryDigest}\n\n` : ``) +
-      (roster ? `Your team right now (trust over memory — current roster; use these ids for @mentions and \`cumora dm\`):\n${roster}\n` : ``)
+      (roster ? `Your team right now (trust over memory — current roster; use these ids for @mentions and \`cumora dm\`):\n${roster}\n` : ``) +
+      (agentState ? `\n${agentState}\n` : ``)
     ).trimEnd()
   }
 
@@ -2205,6 +2228,7 @@ class AgentRunner {
     memoryDigest: string,
     inboxDigest: string,
     roster?: string,
+    agentState?: string,
   ): string {
     return (
       `Current time (UTC): ${new Date().toISOString()} — use this for any --at / deadline math.\n\n` +
@@ -2218,13 +2242,14 @@ class AgentRunner {
         ? `Unread messages that arrived with this wake (also handle anything addressed to you):\n${inboxDigest}\n\n`
         : '') +
       (memoryDigest ? `Your memory index (global \`memory/MEMORY.md\` + current project, if any):\n${memoryDigest}\n\n` : '') +
-      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : '')
+      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : '') +
+      (agentState ? `\n${agentState}\n` : '')
     ).trimEnd()
   }
 
   /** Per-turn AGENDA delta — dynamic bits for a proactive board-work wake; the
    *  invariant mechanics live in the standing prompt. */
-  private agendaDelta(brief: string, memoryDigest: string, roster?: string): string {
+  private agendaDelta(brief: string, memoryDigest: string, roster?: string, agentState?: string): string {
     return (
       `Current time (UTC): ${new Date().toISOString()} — use this for any --at / deadline math.\n\n` +
       `You've been woken by your OWN AGENDA — Kanban cards assigned to you (or @-mentioning you), calendar slots due now, ` +
@@ -2237,7 +2262,8 @@ class AgentRunner {
       `follow your standing instructions for mechanics.\n\n` +
       `${brief}\n\n` +
       (memoryDigest ? `Your memory index (global \`memory/MEMORY.md\` + current project, if any):\n${memoryDigest}\n\n` : ``) +
-      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : ``)
+      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : ``) +
+      (agentState ? `\n${agentState}\n` : ``)
     ).trimEnd()
   }
 
@@ -2300,13 +2326,20 @@ class AgentRunner {
     await bigBrainSem.acquire()
     await spawnPacer.gate()
     try {
-      const [memoryDigest, roster] = await Promise.all([
+      const [memoryDigest, roster, agentState] = await Promise.all([
         this.memoryDigest(),
         runtimeGet<{ roster: string }>(this.cfg.serverUrl, '/roster', token).then((r) => r?.roster ?? '').catch(() => ''),
+        Promise.all([
+          runtimeGet<{ prompt?: string | null }>(this.cfg.serverUrl, '/system-prompt', token),
+          runtimeGet<{ rows?: RuntimeAgentState['skills'] }>(this.cfg.serverUrl, '/skills', token),
+        ]).then(([prompt, skills]) => runtimeAgentStateDelta({
+          prompt: prompt?.prompt,
+          skills: skills?.rows,
+        })).catch(() => ''),
       ])
       const resumeSessionId = this.sessionId
       const session = this.ensureEngineSession()
-      const prompt = this.turnPrompt(session, this.agendaDelta(ag.brief, memoryDigest, roster))
+      const prompt = this.turnPrompt(session, this.agendaDelta(ag.brief, memoryDigest, roster, agentState))
       const engineRun = session
         ? session.send(prompt)
         : this.adapter.run({
@@ -2686,7 +2719,7 @@ class AgentRunner {
         }
         try {
           const turnBackgroundBrief = activeBackgroundBrief
-          const [memoryDigest, triageNote, roster] = await Promise.all([
+          const [memoryDigest, triageNote, roster, agentState] = await Promise.all([
             this.memoryDigest(projectIds),
             Promise.resolve(this.formatTriageNote(triage)),
             // Live team roster (names + roles + ids), fetched fresh from the
@@ -2695,6 +2728,13 @@ class AgentRunner {
             // fetched here, right before a real turn, so no-op wakes pay nothing.
             runtimeGet<{ roster: string }>(this.cfg.serverUrl, '/roster', token)
               .then((r) => r?.roster ?? '').catch(() => ''),
+            Promise.all([
+              runtimeGet<{ prompt?: string | null }>(this.cfg.serverUrl, '/system-prompt', token),
+              runtimeGet<{ rows?: RuntimeAgentState['skills'] }>(this.cfg.serverUrl, '/skills', token),
+            ]).then(([prompt, skills]) => runtimeAgentStateDelta({
+              prompt: prompt?.prompt,
+              skills: skills?.rows,
+            })).catch(() => ''),
           ])
           const resumeSessionId = this.sessionId
           let result: EngineRunResult
@@ -2702,8 +2742,8 @@ class AgentRunner {
           // Standing scaffold rides the session's system-prompt file; send only the
           // small per-turn delta when it does (else inline it — see turnPrompt).
           const delta = turnBackgroundBrief
-            ? this.manualBriefDelta(turnBackgroundBrief, memoryDigest, digest, roster)
-            : this.chatDelta(memoryDigest, triageNote, digest, roster)
+            ? this.manualBriefDelta(turnBackgroundBrief, memoryDigest, digest, roster, agentState)
+            : this.chatDelta(memoryDigest, triageNote, digest, roster, agentState)
           const prompt = this.turnPrompt(session, delta)
           if (session) {
             // PERSISTENT path: feed this turn into the long-lived process — no cold
