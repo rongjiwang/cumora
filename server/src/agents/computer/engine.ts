@@ -1935,7 +1935,11 @@ function codegraphProjectPath(workspace: string): string {
   }
 }
 
-function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
+function codexSecureExecArgs(
+  args: { home: string; env: NodeJS.ProcessEnv },
+  readOnly = false,
+  reasoningEffort: 'medium' | 'high' = 'medium',
+): string[] {
   const workspaceAccess = readOnly ? 'read' : 'write'
   const filesystemEntries = [
     '":minimal"="read"',
@@ -1946,6 +1950,7 @@ function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, rea
   const filesystem = `permissions.cumora.filesystem={${filesystemEntries.join(',')}}`
   const secureArgs = [
     ...CODEX_SECURE_CONFIG_ARGS,
+    '-c', `model_reasoning_effort=${tomlString(reasoningEffort)}`,
     '-c', filesystem,
     '-c', 'web_search="disabled"',
     '-c', 'features.hooks=false',
@@ -2281,18 +2286,17 @@ class CodexAdapter implements EngineAdapter {
 
   classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     // Codex on a ChatGPT account can't pick an arbitrary small model
-    // (`gpt-5-mini` is rejected), but it DOES accept `gpt-5.4-mini` — Cumora's
-    // support tier — so that's the local cerebellum here. Cheap model, no big
-    // brain, no cloud. Override with CUMORA_TRIAGE_MODEL if your codex auth has
-    // a different small model.
+    // (`gpt-5-mini` is rejected), but it DOES accept `gpt-5.6-luna` — Cumora's
+    // support tier — so that's the local cerebellum here. Override with
+    // CUMORA_TRIAGE_MODEL if your codex auth has a different model.
     const flags = allowUnsandboxedByoa() ? extraArgs('CUMORA_TRIAGE_ARGS') : []
-    const model = ['--model', args.model || 'gpt-5.4-mini']
+    const model = ['--model', args.model || 'gpt-5.6-luna']
     const { command, shell, argsPrefix } = resolveCodexSpawn()
     const codexArgs = flags.length
       ? ['exec', ...flags, '-']
       : allowUnsandboxedByoa()
         ? ['exec', ...model, '--skip-git-repo-check', '-']
-        : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true), ...model, '--skip-git-repo-check', '-']
+        : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true, 'high'), ...model, '--skip-git-repo-check', '-']
     const argv = [...argsPrefix, ...codexArgs]
     return spawnCapture(command, argv, {
       cwd: args.cwd, env: args.env, signal: args.signal, onLog: args.onLog, shell,
@@ -2301,14 +2305,14 @@ class CodexAdapter implements EngineAdapter {
   }
 
   probe(args: EngineProbeArgs): Promise<EngineClassifyResult> {
-    // 'small' → gpt-5.4-mini (the cerebellum); 'big' → omit --model so Codex uses
+    // 'small' → gpt-5.6-luna (the cerebellum); 'big' → omit --model so Codex uses
     // its default model. `exec` non-interactive, no bypass/sandbox flags needed
     // for a tool-free one-token reply.
-    const model = args.tier === 'small' ? ['--model', triageModel('gpt-5.4-mini')] : []
+    const model = args.tier === 'small' ? ['--model', triageModel('gpt-5.6-luna')] : []
     const { command, shell, argsPrefix } = resolveCodexSpawn()
     const codexArgs = allowUnsandboxedByoa()
       ? ['exec', ...model, '--skip-git-repo-check', '-']
-      : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true), ...model, '--skip-git-repo-check', '-']
+      : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true, 'high'), ...model, '--skip-git-repo-check', '-']
     const argv = [...argsPrefix, ...codexArgs]
     return spawnCapture(command, argv, {
       cwd: args.cwd, env: args.env, signal: args.signal, shell, stdinText: DOCTOR_PROMPT,
@@ -4138,7 +4142,7 @@ class PiAdapter implements EngineAdapter {
 
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     // pi is multi-provider, so there is no single cheap "cerebellum" id to hard-
-    // code (claude→haiku, codex→gpt-5.4-mini). CUMORA_TRIAGE_MODEL picks one
+    // code (claude→haiku, codex→gpt-5.6-luna). CUMORA_TRIAGE_MODEL picks one
     // (`provider/id`); unset → pi's own default model, which keeps triage local
     // (never the cloud) at the cost of not being cheaper than the big brain.
     // The json stream names the model that actually ran, so the ledger prices
