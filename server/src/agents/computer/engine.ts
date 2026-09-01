@@ -1625,7 +1625,11 @@ function codexSandboxReadPaths(): string[] {
   try {
     const { command } = resolveSpawn('codex')
     const resolved = realpathSync(command)
-    return [resolved.endsWith(join('bin', 'codex.js')) ? dirname(dirname(resolved)) : dirname(resolved)]
+    const binaryDir = dirname(resolved)
+    const installRoot = resolved.endsWith(join('bin', 'codex.js'))
+      ? dirname(binaryDir)
+      : binaryDir
+    return [installRoot, binaryDir, resolved]
   } catch {
     return []
   }
