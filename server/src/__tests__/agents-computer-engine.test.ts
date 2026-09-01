@@ -403,6 +403,7 @@ test('Codex one-shot paths send prompts through stdin', async () => {
   assert.equal(run.exitCode, 0)
   const runCapture = JSON.parse(logs.at(-1) ?? '{}') as { argv?: string[]; stdin?: string }
   assert.ok(runCapture.argv?.includes('default_permissions="cumora"'))
+  assert.ok(runCapture.argv?.includes('model_reasoning_effort="medium"'))
   assert.ok(runCapture.argv?.includes('permissions.cumora.network.enabled=false'))
   assert.ok(runCapture.argv?.includes('shell_environment_policy.inherit="none"'))
   assert.ok(runCapture.argv?.some((arg) => arg.includes(`${JSON.stringify(binDir)}="read"`)))
@@ -449,6 +450,7 @@ test('Codex one-shot paths send prompts through stdin', async () => {
   assert.ok(triageCapture.argv?.some((arg) => arg.includes('permissions.cumora.filesystem={":minimal"="read",":workspace_roots"={"."="read"}')))
   assert.equal(triageCapture.argv?.some((arg) => arg.startsWith('mcp_servers.cumora=')), false)
   assert.ok(triageCapture.argv?.includes('--ignore-user-config'))
+  assert.ok(triageCapture.argv?.includes('model_reasoning_effort="high"'))
   assert.ok(triageCapture.argv?.includes('triage-model'))
   assert.equal(triageCapture.argv?.at(-1), '-')
   assert.equal(triageCapture.stdin, triagePrompt)

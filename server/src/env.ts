@@ -16,13 +16,13 @@ function required(name: string, fallback?: string): string {
   return v
 }
 
-const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? 'gpt-5.5'
-// Cerebellum default — small/fast model used by JSON classifiers and one-shot
+const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? 'gpt-5.6-sol'
+// Cerebellum default — support model used by JSON classifiers and one-shot
 // utilities that don't drive the agent's perceived intelligence (gender infer,
 // palette, completion verifier, agenda pre-check, decision summarizer, etc.).
 // Kept as a *named* default so all cerebellum knobs land on the same model
 // when an operator doesn't override individually.
-const DEFAULT_SUPPORT_MODEL = process.env.OPENAI_MODEL_SUPPORT ?? 'gpt-5.4-mini'
+const DEFAULT_SUPPORT_MODEL = process.env.OPENAI_MODEL_SUPPORT ?? 'gpt-5.6-luna'
 
 // Public-source dev default for the runtime-JWT secret. Safe for a single
 // dev machine; a production deploy left on it lets anyone who read the
@@ -44,9 +44,8 @@ export const env = {
   OPENAI_MODEL: DEFAULT_MODEL,
   /**
    * "Cerebellum" model — JSON classifiers, palette, gender inference,
-   * heartbeat agenda pre-check. Cheap/fast; quality matters less than
-   * latency + cost. Default is a small model (not DEFAULT_MODEL) so
-   * unconfigured deployments still split brain/cerebellum.
+   * heartbeat agenda pre-check. Separate from the main model so deployments
+   * can tune auxiliary work independently.
    */
   OPENAI_MODEL_SUPPORT: DEFAULT_SUPPORT_MODEL,
   /**
