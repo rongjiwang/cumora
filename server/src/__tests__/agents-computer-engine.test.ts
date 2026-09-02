@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { AGENT_OPERATING_CONTRACT } from '../agents/agent-voice.js'
 import { type EngineHopReport, type EngineRunResult, getAdapter, headlessSpawnOptions, resolveSpawn, runnableEngineIds, secureEngineCapabilityReason } from '../agents/computer/engine.js'
 
 const IS_WIN = process.platform === 'win32'
@@ -92,6 +93,29 @@ test('secure adapters replace persona symlinks without writing their targets', {
     assert.equal((await lstat(join(home, personaFile))).isSymbolicLink(), false)
     assert.match(await readFile(join(home, personaFile), 'utf8'), new RegExp(`Secure ${engine}`))
   }
+})
+
+test('Codex scaffold names the files it actually loads', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cumora-codex-scaffold-'))
+  tempDirs.push(root)
+  const home = join(root, 'home')
+  await mkdir(home)
+  await getAdapter('codex').seedHome(home, {
+    id: 'codex', name: 'Codex', role: 'Tester', systemPrompt: null,
+  })
+  const agents = await readFile(join(home, 'AGENTS.md'), 'utf8')
+  assert.match(agents, /`AGENTS\.md` \(this file\)/)
+  assert.match(agents, /OPERATING CONTRACT/)
+  assert.match(agents, /`skills\/` — your skills/)
+  assert.doesNotMatch(agents, /CLAUDE\.md|\.claude\/skills/)
+})
+
+test('shared operating contract defines the approval and system-of-record boundary', () => {
+  assert.match(AGENT_OPERATING_CONTRACT, /Kanban/)
+  assert.match(AGENT_OPERATING_CONTRACT, /Documents/)
+  assert.match(AGENT_OPERATING_CONTRACT, /GitHub/)
+  assert.match(AGENT_OPERATING_CONTRACT, /explicit human approval/)
+  assert.doesNotMatch(AGENT_OPERATING_CONTRACT, /YOU ARE A REAL PERSON/)
 })
 
 test('secure adapters reject linked state directories', {
@@ -389,13 +413,15 @@ test('Codex one-shot paths send prompts through stdin', async () => {
   assert.equal(run.exitCode, 0)
   const runCapture = JSON.parse(logs.at(-1) ?? '{}') as { argv?: string[]; stdin?: string }
   assert.ok(runCapture.argv?.includes('default_permissions="cumora"'))
+  assert.ok(runCapture.argv?.includes('model_reasoning_effort="medium"'))
   assert.ok(runCapture.argv?.includes('permissions.cumora.network.enabled=false'))
   assert.ok(runCapture.argv?.includes('shell_environment_policy.inherit="none"'))
+  assert.ok(runCapture.argv?.some((arg) => arg.includes(`${JSON.stringify(binDir)}="read"`)))
   assert.equal(runCapture.argv?.some((arg) => arg.includes(`${join(root, 'private-ipc', 'requests')}"="write`)), false)
   assert.equal(runCapture.argv?.some((arg) => arg.includes(`${join(root, 'private-ipc', 'responses')}"="write`)), false)
   assert.ok(runCapture.argv?.includes('web_search="disabled"'))
   assert.ok(runCapture.argv?.includes('features.hooks=false'))
-  assert.ok(runCapture.argv?.includes(`projects.${JSON.stringify(home)}.trust_level="untrusted"`))
+  assert.equal(runCapture.argv?.some((arg) => arg.startsWith('projects.')), false)
   assert.ok(runCapture.argv?.some((arg) =>
     arg.startsWith('mcp_servers.cumora={')
       && arg.includes(`command=${JSON.stringify(process.execPath)}`)
@@ -403,6 +429,13 @@ test('Codex one-shot paths send prompts through stdin', async () => {
       && arg.includes(`CUMORA_AGENT_IPC_DIR=${JSON.stringify(join(root, 'private-ipc'))}`)
       && arg.includes('enabled_tools=["cli"]')
       && arg.includes('required=true'),
+  ))
+  assert.ok(runCapture.argv?.some((arg) =>
+    arg.startsWith('mcp_servers.codegraph=')
+      && arg.includes('serve')
+      && arg.includes('--mcp')
+      && arg.includes('--path')
+      && arg.includes(`${join(home, 'workspace')}`),
   ))
   assert.ok(runCapture.argv?.includes('exec'))
   assert.ok(runCapture.argv?.includes('--ignore-user-config'))
@@ -424,9 +457,10 @@ test('Codex one-shot paths send prompts through stdin', async () => {
     signal: new AbortController().signal,
   })
   const triageCapture = JSON.parse(triage.text) as { argv?: string[]; stdin?: string }
-  assert.ok(triageCapture.argv?.includes('permissions.cumora.filesystem={":minimal"="read",":workspace_roots"={"."="read"}}'))
+  assert.ok(triageCapture.argv?.some((arg) => arg.includes('permissions.cumora.filesystem={":minimal"="read",":workspace_roots"={"."="read"}')))
   assert.equal(triageCapture.argv?.some((arg) => arg.startsWith('mcp_servers.cumora=')), false)
   assert.ok(triageCapture.argv?.includes('--ignore-user-config'))
+  assert.ok(triageCapture.argv?.includes('model_reasoning_effort="high"'))
   assert.ok(triageCapture.argv?.includes('triage-model'))
   assert.equal(triageCapture.argv?.at(-1), '-')
   assert.equal(triageCapture.stdin, triagePrompt)

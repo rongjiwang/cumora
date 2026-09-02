@@ -2588,7 +2588,7 @@ Mechanics:
           tools: traceToolDefinitions(),
           request: {
             toolChoice: 'auto',
-            reasoning: { effort: 'low' },
+            reasoning: { effort: 'medium' },
             maxOutputTokens: 4000,
           },
         },
@@ -2628,7 +2628,7 @@ Mechanics:
           input: inputForAttempt,
           tools: TOOL_DEFS_RESPONSES,
           tool_choice: 'auto',
-          reasoning: { effort: 'low' },
+          reasoning: { effort: 'medium' },
           max_output_tokens: 4000,
           // No `previous_response_id` — sub2api's OAuth /v1/responses path
           // rejects it (see history block above). The full transcript is

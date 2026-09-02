@@ -287,7 +287,7 @@ Topic of this convene: ${args.topic}`
       { role: 'user', content: `[Convene moderator]: ${persona.name}, your turn.` },
     ],
     max_output_tokens: 3000,
-    reasoning: { effort: 'low' },
+    reasoning: { effort: 'medium' },
   })
   const body = sanitizeToolCallMarkup(r.output_text ?? '').trim()
   if (body) {

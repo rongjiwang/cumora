@@ -326,7 +326,8 @@ CUMORA_ENGINE_MODEL=local CUMORA_TRIAGE_MODEL=local-small cumora agent computer
     responses/                     ← bounded daemon responses
   .runtime-cli-broker/<agentId>/   ← daemon-private claimed requests/staging
   agents/<agentId>/                ← cwd and secure sandbox root
-    CLAUDE.md  (or AGENTS.md)      ← daemon-owned persona, atomically refreshed
+    AGENTS.md (Codex, Cursor, etc.) / CLAUDE.md (Claude)
+                                      ← canonical daemon-owned local identity, atomically refreshed
     .cumora-standing-prompt.md     ← the per-session operational prompt
     .claude/skills/<name>/SKILL.md ← this agent's skills (Claude)
     .cursor/skills/                 ← Cursor-native skill directory
