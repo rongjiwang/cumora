@@ -29,6 +29,7 @@ import { access, lstat, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/pr
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { AGENT_OPERATING_CONTRACT, agentRoleBoundary } from '../agent-voice.js'
 import { stripLoneSurrogates } from '../text-safety.js'
 import { isCliVersionAtLeast, probeEngineVersion, probeLocalEngineVersion } from './cli-version.js'
 
@@ -1029,9 +1030,11 @@ const PERSONA_HEADER = (
   return `# ${p.name}${p.role ? ` — ${p.role}` : ''}\n\n` +
   `You are **${p.name}**, a member of a team that collaborates in Cumora (a team chat).\n` +
   (p.systemPrompt?.trim() ? `\n## Your style\n${p.systemPrompt.trim()}\n\n` : '\n') +
+  `## Operating contract\n${AGENT_OPERATING_CONTRACT}\n\n` +
+  `## Role boundary\n${agentRoleBoundary(p)}\n\n` +
   `This directory is your private home and your working directory — it persists\n` +
   `across wakes and is yours alone. Its layout:\n` +
-  `- \`${personaFile}\` (this file) — always loaded each wake; keep it short.\n` +
+  `- \`${personaFile}\` (this file) — the canonical, daemon-owned local identity; always loaded each wake.\n` +
   `- \`memory/\` — your durable memory. There is NO hidden memory store: to remember\n` +
   `  something across wakes you MUST write it to a file here (e.g. \`memory/<topic>.md\`)\n` +
   `  and add a one-line pointer in \`memory/MEMORY.md\`. Saying "I'll remember" without\n` +
@@ -1629,7 +1632,10 @@ function codexSandboxReadPaths(): string[] {
     const installRoot = resolved.endsWith(join('bin', 'codex.js'))
       ? dirname(binaryDir)
       : binaryDir
-    return [installRoot, binaryDir, resolved]
+    // bwrap needs the parent mount to traverse the absolute path when Codex
+    // re-execs its native binary from inside the command sandbox.
+    const codexPackages = join(homedir(), '.codex', 'packages')
+    return [codexPackages, dirname(installRoot), installRoot, binaryDir, resolved]
   } catch {
     return []
   }

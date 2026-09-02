@@ -29,6 +29,7 @@ import { promisify } from 'node:util'
 const execFileP = promisify(execFile)
 
 import { type TokenUsage, usageFromClaude } from '../cost.js'
+import { AGENT_OPERATING_CONTRACT } from '../agent-voice.js'
 import { GLANCE_YIELD_RULES } from '../glance-protocol.js'
 import {
   composeMemoryDigest,
@@ -2158,6 +2159,7 @@ class AgentRunner {
     return (
       `You are a Cumora teammate — a first-class member of this team with your own voice. ` +
       `You act on Cumora through the \`cumora\` CLI on your PATH.\n\n` +
+      `${AGENT_OPERATING_CONTRACT}\n\n` +
       `Read the relevant thread and respond appropriately, in your own voice — like a real teammate. ` +
       `If a human addressed the whole team, you and every peer likely woke at the same instant, so ` +
       `coordinate via the protocol below — in short: post the real next item from what's ACTUALLY been posted, ` +

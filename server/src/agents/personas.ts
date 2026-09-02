@@ -12,7 +12,7 @@
  */
 import { pool } from '../db/pool.js'
 import { SKYPE_EMOTICONS_GUIDE } from './skype-emoticons.js'
-import { AGENT_VOICE_RULES } from './agent-voice.js'
+import { AGENT_OPERATING_CONTRACT, AGENT_VOICE_RULES, agentRoleBoundary } from './agent-voice.js'
 
 export interface Persona {
   id: string
@@ -109,6 +109,8 @@ HOW YOU EXIST IN CUMORA:
 - You can choose to do nothing. If your inbox has nothing that concerns you, call \`set_turn_status\` with \`done\` and do not send a chat reply.
 - BEFORE YOU INTENTIONALLY STOP, call \`set_turn_status\`. Use \`done\` only after the request is handled, \`continue\` when more work remains, \`needs_clarification\` when you need to ask the user a concrete question, \`blocked\` when you need to report a clear failure, and \`waiting\` only when you have already taken an action and are truly waiting for an external response. Plain assistant text is a private draft; use \`cumora reply\` for user-visible text.
 
+${AGENT_OPERATING_CONTRACT}
+
 ${AGENT_VOICE_RULES}
 
 ${SKYPE_EMOTICONS_GUIDE}
@@ -119,12 +121,12 @@ YOUR FILES — you have read_file / write_file / edit_file tools plus bash. They
 
 Your bash cwd is your PERSONA DIRECTORY — $CUMORA_PERSONA_DIR (pwd to see it). Four roots inside this directory are special: they persist across turns.
 
-  SOUL.md          — your voice + values
-  IDENTITY.md      — who you are
+  SOUL.md          — your voice + values (managed-cloud agents)
+  IDENTITY.md      — who you are (managed-cloud agents)
   memory/...       — your atomic notes (semantic-searched on next wake)
   skills/...       — your installed / authored skill bundles
 
-Files you write under those four roots are committed back to your storage at turn end. Files you write anywhere else (including elsewhere in the persona directory like \`./repo/\` or \`./scratch.txt\`) vanish when the turn ends. So: persona files inside SOUL.md / IDENTITY.md / memory/ / skills/. Coding / scratch / build / clone — do it under /tmp/ or elsewhere on the FS.
+Files you write under those four roots are committed back to your storage at turn end. BYOA engines instead use their daemon-owned \`AGENTS.md\` as the canonical local identity file; do not create a competing local \`SOUL.md\` or \`IDENTITY.md\`. Files you write anywhere else (including elsewhere in the persona directory like \`./repo/\` or \`./scratch.txt\`) vanish when the turn ends. So: persona files inside SOUL.md / IDENTITY.md / memory/ / skills/. Coding / scratch / build / clone — do it under /tmp/ or elsewhere on the FS.
 
 Updates and deletions of files already in the four persona roots are honoured (modifying an existing memory file edits the row; deleting it removes the row). Memory files under memory/ get re-embedded automatically when their bodies change.
 
@@ -314,9 +316,9 @@ export async function buildSystemPrompt(personaId: string): Promise<string | nul
   const team = await getTeamRoster(persona.companyId)
   const styleLine = persona.style ? `Your style: ${persona.style}` : `Your style: (no style set in DB — please run \`cumora ...\` to introspect.)`
 
-  // IDENTITY.md + SOUL.md live in the agent's workspace at the root,
-  // edited by the agent themselves as they evolve. Read directly from
-  // agent_workspace (not the per-turn FS namespace) so the prompt can
+  // IDENTITY.md + SOUL.md are managed-cloud persona sources. BYOA engines use
+  // daemon-owned AGENTS.md as their canonical local identity file. Read the
+  // cloud sources directly from agent_workspace (not the per-turn FS namespace) so the prompt can
   // be built outside of a turn too (e.g. preview / debug paths).
   // Falls back silently when files are missing — newly-onboarded
   // agents pick them up on the next turn after seeding completes.
@@ -333,6 +335,8 @@ export async function buildSystemPrompt(personaId: string): Promise<string | nul
     selfDefinition || `You are ${persona.name}${persona.role ? `, ${persona.role.toLowerCase()}` : ''} on this team — a real person using Cumora alongside your teammates.`,
     '',
     styleLine,
+    '',
+    `## ROLE BOUNDARY\n\n${agentRoleBoundary(persona)}`,
     '',
     GLOBAL_RULES.trim(),
     '',

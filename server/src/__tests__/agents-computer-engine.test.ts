@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { AGENT_OPERATING_CONTRACT } from '../agents/agent-voice.js'
 import { type EngineHopReport, type EngineRunResult, getAdapter, headlessSpawnOptions, resolveSpawn, runnableEngineIds, secureEngineCapabilityReason } from '../agents/computer/engine.js'
 
 const IS_WIN = process.platform === 'win32'
@@ -104,8 +105,17 @@ test('Codex scaffold names the files it actually loads', async () => {
   })
   const agents = await readFile(join(home, 'AGENTS.md'), 'utf8')
   assert.match(agents, /`AGENTS\.md` \(this file\)/)
+  assert.match(agents, /OPERATING CONTRACT/)
   assert.match(agents, /`skills\/` — your skills/)
   assert.doesNotMatch(agents, /CLAUDE\.md|\.claude\/skills/)
+})
+
+test('shared operating contract defines the approval and system-of-record boundary', () => {
+  assert.match(AGENT_OPERATING_CONTRACT, /Kanban/)
+  assert.match(AGENT_OPERATING_CONTRACT, /Documents/)
+  assert.match(AGENT_OPERATING_CONTRACT, /GitHub/)
+  assert.match(AGENT_OPERATING_CONTRACT, /explicit human approval/)
+  assert.doesNotMatch(AGENT_OPERATING_CONTRACT, /YOU ARE A REAL PERSON/)
 })
 
 test('secure adapters reject linked state directories', {
