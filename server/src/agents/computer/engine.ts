@@ -2295,6 +2295,12 @@ class CodexAdapter implements EngineAdapter {
     // (`gpt-5-mini` is rejected), but it DOES accept `gpt-5.6-luna` — Cumora's
     // support tier — so that's the local cerebellum here. Override with
     // CUMORA_TRIAGE_MODEL if your codex auth has a different model.
+    // Reasoning effort stays at the profile default here. Triage is the most
+    // frequent model call the daemon makes — once per wake per agent, plus the
+    // 20s inbox poll — so it is the last place to buy extra thinking: the gate
+    // only has to answer "is this actionable", and the big brain re-reads the
+    // room anyway. Running it at 'high' measurably accelerated a workspace into
+    // its spend cap for a verdict that did not improve.
     const flags = allowUnsandboxedByoa() ? extraArgs('CUMORA_TRIAGE_ARGS') : []
     const model = ['--model', args.model || 'gpt-5.6-luna']
     const { command, shell, argsPrefix } = resolveCodexSpawn()
@@ -2302,7 +2308,7 @@ class CodexAdapter implements EngineAdapter {
       ? ['exec', ...flags, '-']
       : allowUnsandboxedByoa()
         ? ['exec', ...model, '--skip-git-repo-check', '-']
-        : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true, 'high'), ...model, '--skip-git-repo-check', '-']
+        : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true), ...model, '--skip-git-repo-check', '-']
     const argv = [...argsPrefix, ...codexArgs]
     return spawnCapture(command, argv, {
       cwd: args.cwd, env: args.env, signal: args.signal, onLog: args.onLog, shell,
@@ -2318,7 +2324,7 @@ class CodexAdapter implements EngineAdapter {
     const { command, shell, argsPrefix } = resolveCodexSpawn()
     const codexArgs = allowUnsandboxedByoa()
       ? ['exec', ...model, '--skip-git-repo-check', '-']
-      : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true, 'high'), ...model, '--skip-git-repo-check', '-']
+      : [...codexSecureExecArgs({ home: args.cwd, env: args.env }, true), ...model, '--skip-git-repo-check', '-']
     const argv = [...argsPrefix, ...codexArgs]
     return spawnCapture(command, argv, {
       cwd: args.cwd, env: args.env, signal: args.signal, shell, stdinText: DOCTOR_PROMPT,
