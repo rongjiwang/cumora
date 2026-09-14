@@ -24,11 +24,12 @@
  */
 import { type ChildProcess, execFile, execFileSync, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { access, lstat, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, delimiter as PATH_DELIMITER } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { AGENT_OPERATING_CONTRACT, agentRoleBoundary } from '../agent-voice.js'
 import { stripLoneSurrogates } from '../text-safety.js'
 import { isCustomAnthropicEndpoint, readClaudeUserSettings, withClaudeUserSettingsEnv } from './claude-user-settings.js'
 import { isCliVersionAtLeast, probeEngineVersion, probeLocalEngineVersionWithRetry } from './cli-version.js'
@@ -1211,9 +1212,11 @@ const PERSONA_HEADER = (
   return `# ${p.name}${p.role ? ` — ${p.role}` : ''}\n\n` +
   `You are **${p.name}**, a member of a team that collaborates in Cumora (a team chat).\n` +
   (p.systemPrompt?.trim() ? `\n## Your style\n${p.systemPrompt.trim()}\n\n` : '\n') +
+  `## Operating contract\n${AGENT_OPERATING_CONTRACT}\n\n` +
+  `## Role boundary\n${agentRoleBoundary(p)}\n\n` +
   `This directory is your private home and your working directory — it persists\n` +
   `across wakes and is yours alone. Its layout:\n` +
-  `- \`${personaFile}\` (this file) — always loaded each wake; keep it short.\n` +
+  `- \`${personaFile}\` (this file) — the canonical, daemon-owned local identity; always loaded each wake.\n` +
   `- \`memory/\` — your durable memory. There is NO hidden memory store: to remember\n` +
   `  something across wakes you MUST write it to a file here (e.g. \`memory/<topic>.md\`)\n` +
   `  and add a one-line pointer in \`memory/MEMORY.md\`. Saying "I'll remember" without\n` +
@@ -1896,15 +1899,64 @@ function codexSecureConfigOverrides(args: { home: string; env: NodeJS.ProcessEnv
   return exec === -1 ? full : full.slice(0, Math.max(0, exec - 2))
 }
 
-function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, readOnly = false): string[] {
+/** Codex's Linux launcher re-execs its native binary from inside its own
+ *  bwrap sandbox. Cumora must expose that install root read-only or commands
+ *  fail with ENOENT even though the outer Codex process started successfully. */
+function codexSandboxReadPaths(): string[] {
+  try {
+    const { command } = resolveSpawn('codex')
+    const resolved = realpathSync(command)
+    const binaryDir = dirname(resolved)
+    const installRoot = resolved.endsWith(join('bin', 'codex.js'))
+      ? dirname(binaryDir)
+      : binaryDir
+    // bwrap needs the parent mount to traverse the absolute path when Codex
+    // re-execs its native binary from inside the command sandbox.
+    const codexPackages = join(homedir(), '.codex', 'packages')
+    return [codexPackages, dirname(installRoot), installRoot, binaryDir, resolved]
+  } catch {
+    return []
+  }
+}
+
+function codegraphSandboxReadPaths(): string[] {
+  try {
+    const { command } = resolveSpawn('codegraph')
+    const resolved = realpathSync(command)
+    const binaryDir = dirname(resolved)
+    return [dirname(binaryDir), binaryDir, resolved]
+  } catch {
+    return []
+  }
+}
+
+function codegraphProjectPath(workspace: string): string {
+  try {
+    const indexedProjects = readdirSync(workspace, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(join(workspace, entry.name, '.codegraph')))
+      .map((entry) => join(workspace, entry.name))
+    return indexedProjects.length === 1 ? indexedProjects[0] : workspace
+  } catch {
+    return workspace
+  }
+}
+
+function codexSecureExecArgs(
+  args: { home: string; env: NodeJS.ProcessEnv },
+  readOnly = false,
+  reasoningEffort: 'medium' | 'high' = 'medium',
+): string[] {
   const workspaceAccess = readOnly ? 'read' : 'write'
   const filesystemEntries = [
     '":minimal"="read"',
     `":workspace_roots"={"."="${workspaceAccess}"}`,
+    ...codexSandboxReadPaths().map((path) => `${tomlString(path)}="read"`),
+    ...codegraphSandboxReadPaths().map((path) => `${tomlString(path)}="read"`),
   ]
   const filesystem = `permissions.cumora.filesystem={${filesystemEntries.join(',')}}`
   const secureArgs = [
     ...CODEX_SECURE_CONFIG_ARGS,
+    '-c', `model_reasoning_effort=${tomlString(reasoningEffort)}`,
     '-c', filesystem,
     '-c', 'web_search="disabled"',
     '-c', 'features.hooks=false',
@@ -1944,6 +1996,10 @@ function codexSecureExecArgs(args: { home: string; env: NodeJS.ProcessEnv }, rea
     if (!mcpShim || !ipcDir) throw new Error('secure Cumora MCP bridge is not configured')
     const mcp = `mcp_servers.cumora={command=${tomlString(process.execPath)},args=[${tomlString(mcpShim)}],env={CUMORA_AGENT_IPC_DIR=${tomlString(ipcDir)}},required=true,enabled_tools=["cli"],default_tools_approval_mode="approve"}`
     secureArgs.push('-c', mcp)
+    try {
+      const { command } = resolveSpawn('codegraph')
+      secureArgs.push('-c', `mcp_servers.codegraph={command=${tomlString(command)},args=[${tomlString('serve')},${tomlString('--mcp')},${tomlString('--path')},${tomlString(codegraphProjectPath(join(args.home, 'workspace')))}]}`)
+    } catch { /* CodeGraph is optional on machines that do not install it. */ }
   }
   return [...secureArgs, '-a', 'never', 'exec', '--ignore-user-config', '--ignore-rules']
 }
@@ -2236,12 +2292,17 @@ class CodexAdapter implements EngineAdapter {
 
   classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     // Codex on a ChatGPT account can't pick an arbitrary small model
-    // (`gpt-5-mini` is rejected), but it DOES accept `gpt-5.4-mini` — Cumora's
-    // support tier — so that's the local cerebellum here. Cheap model, no big
-    // brain, no cloud. Override with CUMORA_TRIAGE_MODEL if your codex auth has
-    // a different small model.
+    // (`gpt-5-mini` is rejected), but it DOES accept `gpt-5.6-luna` — Cumora's
+    // support tier — so that's the local cerebellum here. Override with
+    // CUMORA_TRIAGE_MODEL if your codex auth has a different model.
+    // Reasoning effort stays at the profile default here. Triage is the most
+    // frequent model call the daemon makes — once per wake per agent, plus the
+    // 20s inbox poll — so it is the last place to buy extra thinking: the gate
+    // only has to answer "is this actionable", and the big brain re-reads the
+    // room anyway. Running it at 'high' measurably accelerated a workspace into
+    // its spend cap for a verdict that did not improve.
     const flags = allowUnsandboxedByoa() ? extraArgs('CUMORA_TRIAGE_ARGS') : []
-    const model = ['--model', args.model || 'gpt-5.4-mini']
+    const model = ['--model', args.model || 'gpt-5.6-luna']
     const { command, shell, argsPrefix } = resolveCodexSpawn()
     const codexArgs = flags.length
       ? ['exec', ...flags, '-']
@@ -2256,10 +2317,10 @@ class CodexAdapter implements EngineAdapter {
   }
 
   probe(args: EngineProbeArgs): Promise<EngineClassifyResult> {
-    // 'small' → gpt-5.4-mini (the cerebellum); 'big' → omit --model so Codex uses
+    // 'small' → gpt-5.6-luna (the cerebellum); 'big' → omit --model so Codex uses
     // its default model. `exec` non-interactive, no bypass/sandbox flags needed
     // for a tool-free one-token reply.
-    const model = args.tier === 'small' ? ['--model', triageModel('gpt-5.4-mini')] : []
+    const model = args.tier === 'small' ? ['--model', triageModel('gpt-5.6-luna')] : []
     const { command, shell, argsPrefix } = resolveCodexSpawn()
     const codexArgs = allowUnsandboxedByoa()
       ? ['exec', ...model, '--skip-git-repo-check', '-']
@@ -2370,7 +2431,10 @@ class CodexAdapter implements EngineAdapter {
   async seedHome(home: string, persona: EnginePersona): Promise<void> {
     await ensureCommonHome(home)
     // See ClaudeAdapter.seedHome: system-owned, safe to overwrite every start.
-    await atomicAgentWrite(join(home, 'AGENTS.md'), PERSONA_HEADER(persona))
+    await atomicAgentWrite(
+      join(home, 'AGENTS.md'),
+      PERSONA_HEADER(persona, { personaFile: 'AGENTS.md', skillsDir: 'skills/' }),
+    )
   }
 
   run(args: EngineRunArgs): Promise<EngineRunResult> {
@@ -4090,7 +4154,7 @@ class PiAdapter implements EngineAdapter {
 
   async classify(args: EngineClassifyArgs): Promise<EngineClassifyResult> {
     // pi is multi-provider, so there is no single cheap "cerebellum" id to hard-
-    // code (claude→haiku, codex→gpt-5.4-mini). CUMORA_TRIAGE_MODEL picks one
+    // code (claude→haiku, codex→gpt-5.6-luna). CUMORA_TRIAGE_MODEL picks one
     // (`provider/id`); unset → pi's own default model, which keeps triage local
     // (never the cloud) at the cost of not being cheaper than the big brain.
     // The json stream names the model that actually ran, so the ledger prices

@@ -30,6 +30,7 @@ import { promisify } from 'node:util'
 const execFileP = promisify(execFile)
 
 import { type TokenUsage, usageFromClaude } from '../cost.js'
+import { AGENT_OPERATING_CONTRACT } from '../agent-voice.js'
 import { GLANCE_YIELD_RULES } from '../glance-protocol.js'
 import {
   composeMemoryDigest,
@@ -238,11 +239,70 @@ const ENGINE_BACKOFF_AFTER_RATE_LIMIT_MS = 60_000
  *  why. That is most of what a fleet-wide "97% failure rate" actually was. */
 const ENGINE_BACKOFF_AFTER_OPERATOR_FIX_MS = 15 * 60_000
 
+// An `operator-fix` verdict pauses the AGENT. But the cause is the ACCOUNT's —
+// a drained workspace or a signed-out CLI is equally dead for every agent on
+// this computer — and pausing is the wrong answer when the same machine has a
+// second engine that works. Bench the engine instead: syncOnce() re-homes the
+// affected agents onto whatever is still runnable, so a capped Codex hands the
+// turn to a healthy Claude subscription rather than going quiet for 15 minutes.
+// A clean turn clears the bench, so the primary is reclaimed the moment it is
+// paid up. Set CUMORA_ENGINE_FAILOVER_MS=0 to keep the pause and never switch.
+const ENGINE_FAILOVER_MS = Math.max(0, Number(process.env.CUMORA_ENGINE_FAILOVER_MS ?? 30 * 60_000))
+// Ceiling for the escalation below.
+const ENGINE_FAILOVER_MAX_MS = Math.max(ENGINE_FAILOVER_MS, Number(process.env.CUMORA_ENGINE_FAILOVER_MAX_MS ?? 8 * 60 * 60_000))
+const engineBenchedUntil = new Map<EngineId, number>()
+const engineBenchStreak = new Map<EngineId, number>()
+
+/** Bench `id`, doubling the window on each consecutive failure.
+ *
+ *  A FIXED window oscillates, and it was measured doing so: a capped Codex was
+ *  benched at 09:35, expired at 10:05, took every agent back, failed again at
+ *  10:22, and benched again — a full cycle every ~45 minutes, each one costing a
+ *  dead spawn, a fresh operator notice, and a cold-started session on the engine
+ *  the agents were happily using. The context loss is worse than the spend.
+ *
+ *  Escalating fixes it without giving up the retry: an `operator-fix` fault
+ *  lasts until a human acts, so the sensible probe interval grows with the
+ *  evidence that nobody has. 30m, 1h, 2h, 4h, 8h, then hourly-capped — about
+ *  five probes in the first fifteen hours instead of thirty. A clean turn resets
+ *  the streak, so a funded account is reclaimed at full speed. */
+export function benchEngine(id: EngineId, now = Date.now()): void {
+  if (ENGINE_FAILOVER_MS === 0) return
+  const streak = (engineBenchStreak.get(id) ?? 0) + 1
+  engineBenchStreak.set(id, streak)
+  const window = Math.min(ENGINE_FAILOVER_MS * 2 ** (streak - 1), ENGINE_FAILOVER_MAX_MS)
+  engineBenchedUntil.set(id, now + window)
+}
+
+/** A clean turn: this engine works. Drop the bench AND the streak, so the next
+ *  unrelated failure starts from the short window again. */
+export function unbenchEngine(id: EngineId): void {
+  engineBenchedUntil.delete(id)
+  engineBenchStreak.delete(id)
+}
+
+/** Test seam. */
+export function resetEngineBenches(): void {
+  engineBenchedUntil.clear()
+  engineBenchStreak.clear()
+}
+
+export function engineFailoverPool(available: readonly EngineId[], now = Date.now()): EngineId[] {
+  const usable = available.filter((id) => (engineBenchedUntil.get(id) ?? 0) <= now)
+  return usable.length ? usable : [...available]
+}
+
 /** Engine failures that will recur identically until a human intervenes.
  *  Deliberately narrow: only errors whose remedy is unambiguous and whose
  *  retry has no chance of succeeding. Anything uncertain stays on the normal
  *  path and keeps retrying. */
-const OPERATOR_FIX_RE = /not logged in|please run \/login|credit balance is too low|insufficient (credit|quota)|invalid api key|unauthorized/i
+/** Codex on a capped ChatGPT workspace says "You hit your spend cap set by the
+ *  owner of your workspace" — no credit, by a name no other provider uses. It
+ *  belongs in exactly this bucket (a human must raise the cap; retrying cannot
+ *  succeed) but matched none of the patterns above it, so it classified as
+ *  `transient` and kept spinning — the precise failure this mechanism exists to
+ *  stop, on the one provider whose wording it did not know. */
+const OPERATOR_FIX_RE = /not logged in|please run \/login|credit balance is too low|insufficient (credit|quota)|invalid api key|unauthorized|spend cap|out of credits?|billing_hard_limit/i
 
 export function needsOperatorFix(err: string | null | undefined): boolean {
   return !!err && OPERATOR_FIX_RE.test(err)
@@ -477,6 +537,28 @@ interface RuntimeInboxResponse {
     attachment?: { name?: string; kind?: string; mime?: string; size?: number; url?: string } | null
     sequence?: number
   }>
+}
+
+interface RuntimeAgentState {
+  prompt?: string | null
+  skills?: Array<{ name: string; description: string; path: string }>
+}
+
+/** The server's agent_workspace is canonical for persona files and skills.
+ * BYOA homes contain only the engine scaffold, so carry the live DB state into
+ * every turn instead of letting a local engine run with stale or missing state. */
+export function runtimeAgentStateDelta(state: RuntimeAgentState | null): string {
+  if (!state) return ''
+  const sections: string[] = []
+  if (state.prompt?.trim()) sections.push(
+    `Canonical Cumora instructions (loaded from the agent workspace; follow these in addition to this local engine scaffold):\n${state.prompt.trim()}`,
+  )
+  if (state.skills?.length) sections.push(
+    `Installed skills (canonical index; read a skill with \`cumora skills read <name>\` when relevant):\n${state.skills
+      .map((skill) => `- ${skill.name}: ${skill.description} (${skill.path})`)
+      .join('\n')}`,
+  )
+  return sections.join('\n\n')
 }
 
 // How many unread MESSAGE lines the pre-loaded wake digest may carry. It rides
@@ -1902,6 +1984,7 @@ class AgentRunner {
    * so one fresh retry is safe. Every other failure returns immediately to
    * avoid duplicating tool side effects after an ambiguous crash or timeout. */
   private async runWithSessionRecovery(delta: string): Promise<EngineRunResult> {
+    this.beginEngineRun()
     const resumeSessionId = this.resumeSessionId()
     return runWithSessionRecovery({
       resumeSessionId,
@@ -2113,10 +2196,34 @@ class AgentRunner {
    *  paths call this and nothing else assigns engineBackoffUntil, so the chat
    *  wake and the agenda heartbeat cannot drift apart again. */
   private applyTurnBackoff(outcome: TurnOutcome): void {
+    // The engine bench rides the same funnel as the pause, so the two cannot
+    // disagree about whether this engine is usable. Only `operator-fix` benches:
+    // a throttle clears itself inside 60s, and failing over on one would flip
+    // every agent's engine back and forth for a condition already handled.
+    if (outcome === 'operator-fix') benchEngine(this.adapter.id)
+    else if (outcome === 'ok') unbenchEngine(this.adapter.id)
     const until = backoffUntilFor(outcome, Date.now())
     if (until === null) return
     this.engineBackoffUntil = until
     this.engineBackoffWhy = outcome === 'operator-fix' ? 'operator action needed' : 'rate limit'
+  }
+
+  /** `classifyTurnOutcome` plus what the engine actually printed.
+   *
+   *  The summarized error is a best effort: it is assembled from a bounded tail
+   *  of the process output, and a turn whose stdout ends in prompt echo has
+   *  already been observed reaching the operator as "exited with code 1 - DO NOT
+   *  MONOLOGUE…" with the real cause nowhere in it. Classifying on that string
+   *  alone means a drained account reads as `transient` and spins. The signal is
+   *  in the stream either way, so consult both and take the more certain answer.
+   *
+   *  Narrow on purpose: only promotes `transient` — never overrides a throttle
+   *  (which must keep its short, self-clearing cooldown) and never invents a
+   *  failure when the turn actually succeeded. */
+  private turnOutcome(engineError: string | null | undefined): TurnOutcome {
+    const outcome = classifyTurnOutcome(engineError)
+    if (outcome === 'transient' && this.sawOperatorFixSignal) return 'operator-fix'
+    return outcome
   }
 
   private visibleEngineError(exitCode: number, detail?: string): string {
@@ -2435,7 +2542,19 @@ class AgentRunner {
    *  floods the console without telling us anything: per-spawn SessionStart
    *  hook chatter (started/response × N hooks) and rate-limit keepalives. We
    *  keep the signal — assistant text, tool calls/results, init, errors. */
+  /** Did THIS turn's engine output name a fault only a human can clear? Reset
+   *  by `beginEngineRun`, read by `turnOutcome`. */
+  private sawOperatorFixSignal = false
+
+  /** Call immediately before spawning an engine for a turn. */
+  private beginEngineRun(): void {
+    this.sawOperatorFixSignal = false
+  }
+
   private logEngineLine(line: string): void {
+    // Sniff before the noise filter below — a provider can report a limit
+    // inside an event this filter drops.
+    if (!this.sawOperatorFixSignal && needsOperatorFix(line)) this.sawOperatorFixSignal = true
     if (line.includes('"hook_started"') || line.includes('"hook_response"') || line.includes('"rate_limit_event"')) return
     console.log(`[${this.agent.id}/${this.adapter.id}] ${line.slice(0, 500)}`)
   }
@@ -2477,6 +2596,7 @@ class AgentRunner {
     return (
       `You are a Cumora teammate — a first-class member of this team with your own voice. ` +
       actionSurfaceText(this.promptSurface()) +
+      `${AGENT_OPERATING_CONTRACT}\n\n` +
       `Read the relevant thread and respond appropriately, in your own voice — like a real teammate. ` +
       `If a human addressed the whole team, you and every peer likely woke at the same instant, so ` +
       `coordinate via the protocol below — in short: post the real next item from what's ACTUALLY been posted, ` +
@@ -2512,7 +2632,7 @@ class AgentRunner {
   /** Per-turn CHAT delta — only the dynamic bits (the invariant HOW lives in the
    *  standing prompt). Kept small so the persistent session's transcript grows
    *  slowly and native compaction can keep up. */
-  private chatDelta(memoryDigest: string, triageNote: string, inboxDigest: string, roster?: string): string {
+  private chatDelta(memoryDigest: string, triageNote: string, inboxDigest: string, roster?: string, agentState?: string): string {
     return (
       `You've been woken because there's new activity in your Cumora conversations, and the cerebellum triage already ` +
       `decided you should respond — your job is to DO it (write the reply / take the action), not to re-judge whether to. ` +
@@ -2532,7 +2652,8 @@ class AgentRunner {
           `these; but DO \`cumora glance\` before posting in a group, to catch anything posted while you compose):\n${inboxDigest}\n\n`
         : `Run \`cumora inbox\`, then \`cumora messages <conversationId> --tail 30\`, to catch up.\n\n`) +
       (memoryDigest ? `Your memory index (global \`memory/MEMORY.md\` + current project, if any):\n${memoryDigest}\n\n` : ``) +
-      (roster ? `Your team right now (trust over memory — current roster; use these ids for @mentions and \`cumora dm\`):\n${roster}\n` : ``)
+      (roster ? `Your team right now (trust over memory — current roster; use these ids for @mentions and \`cumora dm\`):\n${roster}\n` : ``) +
+      (agentState ? `\n${agentState}\n` : ``)
     ).trimEnd()
   }
 
@@ -2544,6 +2665,7 @@ class AgentRunner {
     memoryDigest: string,
     inboxDigest: string,
     roster?: string,
+    agentState?: string,
   ): string {
     return (
       `Current time (UTC): ${new Date().toISOString()} — use this for any --at / deadline math.\n\n` +
@@ -2557,13 +2679,14 @@ class AgentRunner {
         ? `Unread messages that arrived with this wake (also handle anything addressed to you):\n${inboxDigest}\n\n`
         : '') +
       (memoryDigest ? `Your memory index (global \`memory/MEMORY.md\` + current project, if any):\n${memoryDigest}\n\n` : '') +
-      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : '')
+      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : '') +
+      (agentState ? `\n${agentState}\n` : '')
     ).trimEnd()
   }
 
   /** Per-turn AGENDA delta — dynamic bits for a proactive board-work wake; the
    *  invariant mechanics live in the standing prompt. */
-  private agendaDelta(brief: string, memoryDigest: string, roster?: string): string {
+  private agendaDelta(brief: string, memoryDigest: string, roster?: string, agentState?: string): string {
     return (
       `Current time (UTC): ${new Date().toISOString()} — use this for any --at / deadline math.\n\n` +
       `You've been woken by your OWN AGENDA — Kanban cards assigned to you (or @-mentioning you), calendar slots due now, ` +
@@ -2576,7 +2699,8 @@ class AgentRunner {
       `follow your standing instructions for mechanics.\n\n` +
       `${brief}\n\n` +
       (memoryDigest ? `Your memory index (global \`memory/MEMORY.md\` + current project, if any):\n${memoryDigest}\n\n` : ``) +
-      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : ``)
+      (roster ? `Your team (use these ids for @mentions):\n${roster}\n` : ``) +
+      (agentState ? `\n${agentState}\n` : ``)
     ).trimEnd()
   }
 
@@ -2639,11 +2763,18 @@ class AgentRunner {
     await bigBrainSem.acquire()
     await spawnPacer.gate()
     try {
-      const [memoryDigest, roster] = await Promise.all([
+      const [memoryDigest, roster, agentState] = await Promise.all([
         this.memoryDigest(),
         runtimeGet<{ roster: string }>(this.cfg.serverUrl, '/roster', token).then((r) => r?.roster ?? '').catch(() => ''),
+        Promise.all([
+          runtimeGet<{ prompt?: string | null }>(this.cfg.serverUrl, '/system-prompt', token),
+          runtimeGet<{ rows?: RuntimeAgentState['skills'] }>(this.cfg.serverUrl, '/skills', token),
+        ]).then(([prompt, skills]) => runtimeAgentStateDelta({
+          prompt: prompt?.prompt,
+          skills: skills?.rows,
+        })).catch(() => ''),
       ])
-      const result = await this.runWithSessionRecovery(this.agendaDelta(ag.brief, memoryDigest, roster))
+      const result = await this.runWithSessionRecovery(this.agendaDelta(ag.brief, memoryDigest, roster, agentState))
       exitCode = result.exitCode
       turnUsage = result.usage
       turnModel = result.model
@@ -2669,8 +2800,9 @@ class AgentRunner {
     // Rate-limit: same as chat-turn path — suppress the user-facing notice
     // and just defer (no inbox state to keep here since agenda turns are
     // proactive; next heartbeat re-evaluates after cooldown).
-    const outcome = classifyTurnOutcome(engineError)
-    if (engineError && outcome !== 'rate-limited') {
+    const outcome = this.turnOutcome(engineError)
+    // Same self-termination rule as the chat path (see there).
+    if (engineError && outcome !== 'rate-limited' && !this.stopped) {
       await this.publishEngineFailure({ token, runId: run?.runId, conversationId: null, error: engineError, exitCode })
     }
     if (outcome === 'rate-limited') {
@@ -3013,7 +3145,7 @@ class AgentRunner {
         }
         try {
           const turnBackgroundBrief = activeBackgroundBrief
-          const [memoryDigest, triageNote, roster] = await Promise.all([
+          const [memoryDigest, triageNote, roster, agentState] = await Promise.all([
             this.memoryDigest(projectIds),
             Promise.resolve(this.formatTriageNote(triage)),
             // Live team roster (names + roles + ids), fetched fresh from the
@@ -3022,10 +3154,17 @@ class AgentRunner {
             // fetched here, right before a real turn, so no-op wakes pay nothing.
             runtimeGet<{ roster: string }>(this.cfg.serverUrl, '/roster', token)
               .then((r) => r?.roster ?? '').catch(() => ''),
+            Promise.all([
+              runtimeGet<{ prompt?: string | null }>(this.cfg.serverUrl, '/system-prompt', token),
+              runtimeGet<{ rows?: RuntimeAgentState['skills'] }>(this.cfg.serverUrl, '/skills', token),
+            ]).then(([prompt, skills]) => runtimeAgentStateDelta({
+              prompt: prompt?.prompt,
+              skills: skills?.rows,
+            })).catch(() => ''),
           ])
           const delta = turnBackgroundBrief
-            ? this.manualBriefDelta(turnBackgroundBrief, memoryDigest, digest, roster)
-            : this.chatDelta(memoryDigest, triageNote, digest, roster)
+            ? this.manualBriefDelta(turnBackgroundBrief, memoryDigest, digest, roster, agentState)
+            : this.chatDelta(memoryDigest, triageNote, digest, roster, agentState)
           const result = await this.runWithSessionRecovery(delta)
           exitCode = result.exitCode
           turnUsage = result.usage
@@ -3064,7 +3203,7 @@ class AgentRunner {
         // user from seeing a row of "byoa_engine_failed" markers in chat for
         // what is really a transient provider throttle. Persist a quieter
         // signal to the run row instead so it shows up in observability.
-        const outcome = classifyTurnOutcome(engineError)
+        const outcome = this.turnOutcome(engineError)
         const rateLimited = outcome === 'rate-limited'
         // An engine nobody has logged into will fail the same way on the next
         // poll, and the one after that. Cool down like a rate limit so the
@@ -3073,7 +3212,13 @@ class AgentRunner {
         if (outcome === 'operator-fix') {
           console.warn(`[computer] ${this.agent.id} engine needs operator action — pausing ${Math.round(ENGINE_BACKOFF_AFTER_OPERATOR_FIX_MS / 60000)}min: ${engineError?.slice(0, 160)}`)
         }
-        if (engineError && !rateLimited) {
+        // `stopped` means WE ended this runner — a failover re-homing the agent
+        // onto another engine, an operator edit, or daemon shutdown. The engine
+        // child is killed mid-turn and reports exit 128 (terminated by signal),
+        // which is not a fault the user can act on and reads as noise beside the
+        // real reason the switch happened. The unread is kept either way, so the
+        // replacement runner retries it immediately.
+        if (engineError && !rateLimited && !this.stopped) {
           await this.publishEngineFailure({
             token,
             runId: run?.runId,
@@ -3315,7 +3460,7 @@ async function doRun(serverOverride?: string): Promise<void> {
       console.warn('[computer] agent sync failed:', err instanceof Error ? err.message : err)
       return
     }
-    const available = engineInventory.current
+    const available = engineFailoverPool(engineInventory.current)
     for (const agent of agents) {
       const engine = resolveAvailableEngine(agent.engine, available)
       if (!engine) {
