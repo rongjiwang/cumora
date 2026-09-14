@@ -2801,7 +2801,8 @@ class AgentRunner {
     // and just defer (no inbox state to keep here since agenda turns are
     // proactive; next heartbeat re-evaluates after cooldown).
     const outcome = this.turnOutcome(engineError)
-    if (engineError && outcome !== 'rate-limited') {
+    // Same self-termination rule as the chat path (see there).
+    if (engineError && outcome !== 'rate-limited' && !this.stopped) {
       await this.publishEngineFailure({ token, runId: run?.runId, conversationId: null, error: engineError, exitCode })
     }
     if (outcome === 'rate-limited') {
@@ -3211,7 +3212,13 @@ class AgentRunner {
         if (outcome === 'operator-fix') {
           console.warn(`[computer] ${this.agent.id} engine needs operator action — pausing ${Math.round(ENGINE_BACKOFF_AFTER_OPERATOR_FIX_MS / 60000)}min: ${engineError?.slice(0, 160)}`)
         }
-        if (engineError && !rateLimited) {
+        // `stopped` means WE ended this runner — a failover re-homing the agent
+        // onto another engine, an operator edit, or daemon shutdown. The engine
+        // child is killed mid-turn and reports exit 128 (terminated by signal),
+        // which is not a fault the user can act on and reads as noise beside the
+        // real reason the switch happened. The unread is kept either way, so the
+        // replacement runner retries it immediately.
+        if (engineError && !rateLimited && !this.stopped) {
           await this.publishEngineFailure({
             token,
             runId: run?.runId,
